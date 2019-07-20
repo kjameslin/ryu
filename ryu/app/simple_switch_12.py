@@ -22,13 +22,13 @@ from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import ether_types
 
-
 class SimpleSwitch12(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_2.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
         super(SimpleSwitch12, self).__init__(*args, **kwargs)
         self.mac_to_port = {}
+        self.msg_reason=set()
 
     def add_flow(self, datapath, port, dst, src, actions):
         ofproto = datapath.ofproto
@@ -46,6 +46,8 @@ class SimpleSwitch12(app_manager.RyuApp):
             out_port=ofproto.OFPP_ANY,
             out_group=ofproto.OFPG_ANY,
             flags=0, match=match, instructions=inst)
+        
+        # we send a msg to let switch to modify its flow table
         datapath.send_msg(mod)
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
@@ -55,32 +57,64 @@ class SimpleSwitch12(app_manager.RyuApp):
         ofproto = datapath.ofproto
         in_port = msg.match['in_port']
 
+        print("inport ",in_port)
+        
+        reason=msg.reason
+        # print("Reason: ",reason)
+        if reason==ofproto.OFPR_NO_MATCH:
+            print("no match")
+            self.msg_reason.add("no match")
+        elif reason==ofproto.OFPR_ACTION:
+                print("action")
+                self.msg_reason.add("no match")
+        elif reason==ofproto.OFPR_INVALID_TTL:
+                print("invalid ttl")
+                self.msg_reason.add("no match")
+        else:
+            print("unknown")
+            self.msg_reason.add("unknown")
+
+
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocols(ethernet.ethernet)[0]
 
         if eth.ethertype == ether_types.ETH_TYPE_LLDP:
+            print("this is lldp")
             # ignore lldp packet
             return
         dst = eth.dst
         src = eth.src
 
         dpid = datapath.id
+        print("dpid",dpid)
         self.mac_to_port.setdefault(dpid, {})
 
         self.logger.info("packet in %s %s %s %s", dpid, src, dst, in_port)
 
         # learn a mac address to avoid FLOOD next time.
+        '''
+        mac_to_port {
+            dpid:{
+                src_mac:in_port
+            }
+        }
+        '''
         self.mac_to_port[dpid][src] = in_port
 
         if dst in self.mac_to_port[dpid]:
+            # we know the out port of the dst mac address
             out_port = self.mac_to_port[dpid][dst]
         else:
+            # we do not know,so we flood
             out_port = ofproto.OFPP_FLOOD
 
         actions = [datapath.ofproto_parser.OFPActionOutput(out_port)]
 
         # install a flow to avoid packet_in next time
         if out_port != ofproto.OFPP_FLOOD:
+            # we know the out port of the dst mac address
+            # we modify the flow table
+            print("Add flow")
             self.add_flow(datapath, in_port, dst, src, actions)
 
         data = None
