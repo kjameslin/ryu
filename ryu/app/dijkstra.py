@@ -239,9 +239,6 @@ class DijkstraController(app_manager.RyuApp):
         pkt=packet.Packet(msg.data)
         eth=pkt.get_protocols(ethernet.ethernet)[0]
 
-       
-
-
         # drop lldp
         if eth.ethertype==ether_types.ETH_TYPE_LLDP:
             self.logger.info("LLDP")
@@ -397,6 +394,8 @@ class DijkstraController(app_manager.RyuApp):
     
     #https://github.com/osrg/ryu/pull/55/commits/8916ab85072efc75b97f987a0696ff1fe64cbf42
     # reference 
+    # packet api https://ryu.readthedocs.io/en/latest/library_packet.html
+    # arppacket api https://ryu.readthedocs.io/en/latest/library_packet_ref/packet_arp.html
     #TODO figure out how the function works
     def arp_handler(self, msg):
         datapath = msg.datapath
