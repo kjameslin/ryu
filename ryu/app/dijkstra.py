@@ -218,6 +218,7 @@ class DijkstraController(app_manager.RyuApp):
 
         # drop lldp
         if eth.ethertype==ether_types.ETH_TYPE_LLDP:
+            self.logger.info("LLDP")
             return
 
         dst_mac=eth.dst
