@@ -11,6 +11,13 @@ from ryu.lib.packet import ether_types
 #https://github.com/Ehsan70/RyuApps/blob/master/TopoDiscoveryInRyu.md
 from ryu.topology.api import get_switch,get_all_link,get_link
 import copy
+
+from ryu.lib.packet import arp
+from ryu.lib.packet import ipv6
+from ryu.lib import mac
+
+
+
 # this is topo implementing dijkstra algorithm
 class Topo(object):
     def __init__(self):
@@ -125,8 +132,16 @@ class DijkstraController(app_manager.RyuApp):
         self.mac_to_port={}
         # logical switches
         self.datapaths=[]
+        self.arp_table={}
 
         self.topo=Topo()
+        #avoid broadcast storm
+        # {
+        #   dpid:[]
+        # }
+        #
+        self.flood_history={}
+        self.sw={}
     
     def _find_dp(self,dpid):
         for dp in self.datapaths:
@@ -216,6 +231,9 @@ class DijkstraController(app_manager.RyuApp):
         pkt=packet.Packet(msg.data)
         eth=pkt.get_protocols(ethernet.ethernet)[0]
 
+       
+
+
         # drop lldp
         if eth.ethertype==ether_types.ETH_TYPE_LLDP:
             self.logger.info("LLDP")
@@ -223,10 +241,21 @@ class DijkstraController(app_manager.RyuApp):
 
         dst_mac=eth.dst
         src_mac=eth.src
+        arp_pkt = pkt.get_protocol(arp.arp)
+        if arp_pkt:
+            self.arp_table[arp_pkt.src_ip] = src_mac  # ARP learning
 
         dpid=datapath.id
 
         self.mac_to_port.setdefault(dpid,{})
+
+        self.flood_history.setdefault(dpid,[])
+        if '33:33' in dst_mac[:5]:
+            if (src_mac,dst_mac) not in self.flood_history[dpid]:
+                self.flood_history[dpid].append((src_mac,dst_mac))
+            else:
+                return
+                
         self.logger.info("packet in %s %s %s %s", dpid, src_mac, dst_mac, in_port)
 
         ''' 
@@ -239,6 +268,17 @@ class DijkstraController(app_manager.RyuApp):
         '''
 
         self.mac_to_port[dpid][src_mac]=in_port
+        flood=False
+
+        # if '33:33' not in dst_mac[:5]:
+        #     flood=False
+        # if '33:33' in dst_mac[:5] and dst_mac in self.flood_history[dpid]:
+        #     flood=False
+        
+        # if '33:33' in dst_mac[:5] and dst_mac not in self.flood_history[dpid]:
+        #     flood=True
+        
+
         if src_mac not in self.topo.host_mac_to.keys():
             self.topo.host_mac_to[src_mac]=(dpid,in_port)
         
@@ -273,9 +313,14 @@ class DijkstraController(app_manager.RyuApp):
             self.logger.info("Configure done")
 
             out_port=shortest_path[0][2]
-        else:
+        else: 
+            if self.arp_handler(msg):  # 1:reply or drop;  0: flood
+                return 
             #the dst mac has not registered
             out_port=ofproto.OFPP_FLOOD
+
+        # if out_port != ofproto.OFPP_FLOOD:
+        #     self.add_flow(datapath, msg.in_port, dst, src, actions)
 
         actions=[parser.OFPActionOutput(out_port)]
 
@@ -331,7 +376,67 @@ class DijkstraController(app_manager.RyuApp):
         self.logger.info("All links:\n "+all_link_repr)
 
         self.logger.info("Assign adjacent")
+    
+    def arp_handler(self, msg):
+        datapath = msg.datapath
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        in_port = msg.match['in_port']
 
+        pkt = packet.Packet(msg.data)
+        eth = pkt.get_protocols(ethernet.ethernet)[0]
+        arp_pkt = pkt.get_protocol(arp.arp)
 
+        if eth:
+            eth_dst = eth.dst
+            eth_src = eth.src
+
+         # Break the loop for avoiding ARP broadcast storm
+        if eth_dst == mac.BROADCAST_STR and arp_pkt:
+            arp_dst_ip = arp_pkt.dst_ip
+
+            if (datapath.id, eth_src, arp_dst_ip) in self.sw:
+                if self.sw[(datapath.id, eth_src, arp_dst_ip)] != in_port:
+                    datapath.send_packet_out(in_port=in_port, actions=[])
+                    return True
+            else:
+                self.sw[(datapath.id, eth_src, arp_dst_ip)] = in_port
+
+         # Try to reply arp request
+        if arp_pkt:
+            hwtype = arp_pkt.hwtype
+            proto = arp_pkt.proto
+            hlen = arp_pkt.hlen
+            plen = arp_pkt.plen
+            opcode = arp_pkt.opcode
+            arp_src_ip = arp_pkt.src_ip
+            arp_dst_ip = arp_pkt.dst_ip
+
+            if opcode == arp.ARP_REQUEST:
+                if arp_dst_ip in self.arp_table:
+                    actions = [parser.OFPActionOutput(in_port)]
+                    ARP_Reply = packet.Packet()
+
+                    ARP_Reply.add_protocol(ethernet.ethernet(
+                        ethertype=eth.ethertype,
+                        dst=eth_src,
+                        src=self.arp_table[arp_dst_ip]))
+                    ARP_Reply.add_protocol(arp.arp(
+                        opcode=arp.ARP_REPLY,
+                        src_mac=self.arp_table[arp_dst_ip],
+                        src_ip=arp_dst_ip,
+                        dst_mac=eth_src,
+                        dst_ip=arp_src_ip))
+
+                    ARP_Reply.serialize()
+
+                    out = parser.OFPPacketOut(
+                        datapath=datapath,
+                        buffer_id=ofproto.OFP_NO_BUFFER,
+                        in_port=ofproto.OFPP_CONTROLLER,
+                        actions=actions, data=ARP_Reply.data)
+                    datapath.send_msg(out)
+                    return True
+        return False
 
 
