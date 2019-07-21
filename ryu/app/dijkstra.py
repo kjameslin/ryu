@@ -23,14 +23,18 @@ class Topo(object):
     def __init__(self):
         # adjacent map (s1,s2)->(port,weight)
         self.adjacent=defaultdict(lambda s1s2:None)
+        #datapathes
         self.switches=None
         # switch distances
 
         # use a map to host_mac->(switch,inport)
         self.host_mac_to={}
     
-    # def __str__(self):
-        # pass
+    def reset(self):
+        self.adjacent=defaultdict(lambda s1s2:None)
+        self.switches=None
+        self.host_mac_to=None
+    
     
     def get_adjacent(self,s1,s2):
         return self.adjacent.get((s1,s2))
@@ -123,7 +127,7 @@ class Topo(object):
         return record
 
 
-
+#TODO Port status monitor
 class DijkstraController(app_manager.RyuApp):
     OFP_VERSIONS=[ofproto_v1_3.OFP_VERSION]
 
@@ -132,7 +136,11 @@ class DijkstraController(app_manager.RyuApp):
         self.mac_to_port={}
         # logical switches
         self.datapaths=[]
+        #ip ->mac
         self.arp_table={}
+        #revser arp
+        # mac->ip
+        self.rarp_table={}
 
         self.topo=Topo()
         #avoid broadcast storm
@@ -341,7 +349,19 @@ class DijkstraController(app_manager.RyuApp):
     #https://vlkan.com/blog/post/2013/08/06/sdn-discovery/
     @set_ev_cls(event.EventSwitchEnter)
     def switch_enter_handler(self,event):
-        self.logger.info("A switch entered")
+        self.logger.info("A switch entered.Topology rediscovery...")
+        self.switch_status_handler(event)
+        self.logger.info('Topology rediscovery done')
+    
+    @set_ev_cls(event.EventSwitchLeave)
+    def switch_leave_handler(self,event):
+        self.logger.info("A switch leaved.Topology rediscovery...")
+        self.switch_status_handler(event)
+        self.logger.info('Topology rediscovery done')
+
+
+
+    def switch_status_handler(self,event):
         #api get_switch
         #api app.send_request()
         #api switch_request_handler
@@ -374,9 +394,10 @@ class DijkstraController(app_manager.RyuApp):
             self.topo.set_adjacent(s1,s2,p1,1)
             self.topo.set_adjacent(s2,s1,p2,1)
         self.logger.info("All links:\n "+all_link_repr)
-
-        self.logger.info("Assign adjacent")
     
+    #https://github.com/osrg/ryu/pull/55/commits/8916ab85072efc75b97f987a0696ff1fe64cbf42
+    # reference 
+    #TODO figure out how the function works
     def arp_handler(self, msg):
         datapath = msg.datapath
         ofproto = datapath.ofproto
