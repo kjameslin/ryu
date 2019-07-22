@@ -11,7 +11,7 @@ from ryu.lib.packet import ether_types
 #https://github.com/Ehsan70/RyuApps/blob/master/TopoDiscoveryInRyu.md
 from ryu.topology.api import get_switch,get_all_link,get_link
 import copy
-
+import random
 from ryu.lib.packet import arp
 from ryu.lib.packet import ipv6
 from ryu.lib import mac
@@ -388,8 +388,9 @@ class DijkstraController(app_manager.RyuApp):
             all_link_repr+='s{}p{}--s{}p{}\n'.format(s1,p1,s2,p2)
             # we would assign weight randomly
             # but we have to consider the weight consistency
-            self.topo.set_adjacent(s1,s2,p1,1)
-            self.topo.set_adjacent(s2,s1,p2,1)
+            weight=random.randint(1,10)
+            self.topo.set_adjacent(s1,s2,p1,weight)
+            self.topo.set_adjacent(s2,s1,p2,weight)
         self.logger.info("All links:\n "+all_link_repr)
     
     #https://github.com/osrg/ryu/pull/55/commits/8916ab85072efc75b97f987a0696ff1fe64cbf42
