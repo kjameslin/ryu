@@ -80,7 +80,7 @@ class Topo(object):
                 # for each neighbor s of u:   
                 if self.get_adjacent(u,s) is not None:
                     _,weight=self.get_adjacent(u,s)
-                    if distance[u]+weight<=distance[s]:
+                    if distance[u]+weight<distance[s]:
                         distance[s]=distance[u]+weight
                         previous[s]=u
 
@@ -98,6 +98,8 @@ class Topo(object):
                 break
             p=q
             record.append(p)
+            print("Len switches: {}".format(len(record)))
+            # self.logger.info("Len switches: "+len(record))
             q=previous[p]
             
         #we reverse the list 
@@ -138,25 +140,33 @@ class DijkstraController(app_manager.RyuApp):
         self.datapaths=[]
         #ip ->mac
         self.arp_table={}
+
         #revser arp
         # mac->ip
+        # this is a TODO
+        # not implemented
         self.rarp_table={}
 
         self.topo=Topo()
-        #avoid broadcast storm
-        # {
-        #   dpid:[]
-        # }
-        #
         self.flood_history={}
-        self.sw={}
+
+        self.arp_history={}
+        self.is_learning=[]
     
     def _find_dp(self,dpid):
         for dp in self.datapaths:
             if dp.id==dpid:
                 return dp
         return None
+    
+    def _add_islearning(self,src_mac,dst_mac):
+        self.is_learning.append((src_mac,dst_mac))
+    
+    def _remove_islearning(self,src_mac,dst_mac):
+        self.is_learning.remove((src_mac,dst_mac))
+    
 
+    #copy from example
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
@@ -206,12 +216,14 @@ class DijkstraController(app_manager.RyuApp):
 
             actions=[parser.OFPActionOutput(outport)]
 
-            # get current switch,index minus 1
+
             datapath=self._find_dp(int(switch))
             # datapath=self.datapaths[int(switch)-1]
 
             inst=[parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,actions)]
 
+            #idle and hardtimeout set to 0,making the entry permanent
+            #reference openflow spec
             mod=datapath.ofproto_parser.OFPFlowMod(
                 datapath=datapath,
                 match=match,
@@ -245,50 +257,60 @@ class DijkstraController(app_manager.RyuApp):
             return
 
         dst_mac=eth.dst
+
         src_mac=eth.src
+
         arp_pkt = pkt.get_protocol(arp.arp)
+
+        # a map recording arp table from arp request
+        # app_table={
+        #     ip:mac
+        # }
         if arp_pkt:
             self.arp_table[arp_pkt.src_ip] = src_mac  # ARP learning
 
         dpid=datapath.id
 
+
+        #mac_to_port is a two-level map, which records the mapping relation between mac address and port, for a particular switch
+        #python built-in function
+        #for a map,if key doesnt exsit,return the default value,which is a empty map {}
+        #mac_to_port={
+        #     switch:{
+        #     mac:port
+        #     }
+        # }
         self.mac_to_port.setdefault(dpid,{})
 
+        # flood_history help the controller remember whether a particular switch flooded a packet(identified by src and destination mac) before
+        # flood_history={
+        #    switch:[(src_mac,dst_mac)]
+        # }
+
         self.flood_history.setdefault(dpid,[])
+        # if this is a ipv6 broadcast packet
         if '33:33' in dst_mac[:5]:
+            # the controller has not flooded this packet before
             if (src_mac,dst_mac) not in self.flood_history[dpid]:
+                # we remember this packet
                 self.flood_history[dpid].append((src_mac,dst_mac))
             else:
+            # the controller have flooded this packet before,we do nothing and return
                 return
                 
         self.logger.info("packet in %s %s %s %s", dpid, src_mac, dst_mac, in_port)
 
-        ''' 
-        we record mac address - port
-        mac_to_port:{
-            dpid:{
-                src_mac:in_port
-            }
-        }
-        '''
-
         self.mac_to_port[dpid][src_mac]=in_port
-        flood=False
 
-        # if '33:33' not in dst_mac[:5]:
-        #     flood=False
-        # if '33:33' in dst_mac[:5] and dst_mac in self.flood_history[dpid]:
-        #     flood=False
-        
-        # if '33:33' in dst_mac[:5] and dst_mac not in self.flood_history[dpid]:
-        #     flood=True
-        
+       
 
         if src_mac not in self.topo.host_mac_to.keys():
             self.topo.host_mac_to[src_mac]=(dpid,in_port)
         
         # we must assure all the mac has registered
+        # host_mac-> switch,inport
         if dst_mac in self.topo.host_mac_to.keys():
+            
             # the dst mac has registered
             final_port=self.topo.host_mac_to[dst_mac][1]
             # calculate the first
@@ -317,15 +339,19 @@ class DijkstraController(app_manager.RyuApp):
             self.configure_path(shortest_path,event,src_mac,dst_mac)
             self.logger.info("Configure done")
 
-            out_port=shortest_path[0][2]
+            # current_switch=None
+            out_port=None
+            for s,_,op in shortest_path:
+                if s==dpid:
+                    out_port=op
         else: 
+            # handle arp packet
             if self.arp_handler(msg):  # 1:reply or drop;  0: flood
                 return 
             #the dst mac has not registered
+            self.logger.info("We have not learn the mac address {},flooding...".format(dst_mac))
             out_port=ofproto.OFPP_FLOOD
 
-        # if out_port != ofproto.OFPP_FLOOD:
-        #     self.add_flow(datapath, msg.in_port, dst, src, actions)
 
         actions=[parser.OFPActionOutput(out_port)]
 
@@ -334,6 +360,7 @@ class DijkstraController(app_manager.RyuApp):
         if msg.buffer_id==ofproto.OFP_NO_BUFFER:
             data=msg.data
         
+        # send the packet out to avoid packet loss
         out=parser.OFPPacketOut(
             datapath=datapath,
             buffer_id=msg.buffer_id,
@@ -363,7 +390,7 @@ class DijkstraController(app_manager.RyuApp):
         #api app.send_request()
         #api switch_request_handler
         #return reply.switches
-        # switch.dp.id
+        #switch.dp.id
         all_switches=copy.copy(get_switch(self,None))
 
         # get all datapathid 
@@ -389,6 +416,7 @@ class DijkstraController(app_manager.RyuApp):
             # we would assign weight randomly
             # but we have to consider the weight consistency
             weight=random.randint(1,10)
+            # weight=1
             self.topo.set_adjacent(s1,s2,p1,weight)
             self.topo.set_adjacent(s2,s1,p2,weight)
         self.logger.info("All links:\n "+all_link_repr)
@@ -397,8 +425,8 @@ class DijkstraController(app_manager.RyuApp):
     # reference 
     # packet api https://ryu.readthedocs.io/en/latest/library_packet.html
     # arppacket api https://ryu.readthedocs.io/en/latest/library_packet_ref/packet_arp.html
-    #TODO figure out how the function works
     def arp_handler(self, msg):
+
         datapath = msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -412,18 +440,24 @@ class DijkstraController(app_manager.RyuApp):
             eth_dst = eth.dst
             eth_src = eth.src
 
-         # Break the loop for avoiding ARP broadcast storm
+        # Break the loop for avoiding ARP broadcast storm
         if eth_dst == mac.BROADCAST_STR and arp_pkt:
+            # target ip 
             arp_dst_ip = arp_pkt.dst_ip
 
-            if (datapath.id, eth_src, arp_dst_ip) in self.sw:
-                if self.sw[(datapath.id, eth_src, arp_dst_ip)] != in_port:
-                    datapath.send_packet_out(in_port=in_port, actions=[])
+            # we have met this particular arp request before
+            if (datapath.id, eth_src, arp_dst_ip) in self.arp_history:
+                #(datapath.id,eth_src,target_ip)->inport
+                # the new arp packet did not consist with the record,maybe a broadcasted one
+                # we just ignore it
+                if self.arp_history[(datapath.id, eth_src, arp_dst_ip)] != in_port:
+                    #datapath.send_packet_out(in_port=in_port, actions=[])
                     return True
             else:
-                self.sw[(datapath.id, eth_src, arp_dst_ip)] = in_port
-
-         # Try to reply arp request
+                # we didnt met this packet before, record
+                self.arp_history[(datapath.id, eth_src, arp_dst_ip)] = in_port
+        
+        #construct arp packet
         if arp_pkt:
             hwtype = arp_pkt.hwtype
             proto = arp_pkt.proto
@@ -433,29 +467,33 @@ class DijkstraController(app_manager.RyuApp):
             arp_src_ip = arp_pkt.src_ip
             arp_dst_ip = arp_pkt.dst_ip
 
+            # arp_request
             if opcode == arp.ARP_REQUEST:
+                # we have learned the target ip mac mapping
                 if arp_dst_ip in self.arp_table:
+                    # send arp reply from in port
                     actions = [parser.OFPActionOutput(in_port)]
-                    ARP_Reply = packet.Packet()
+                    arp_reply = packet.Packet()
+                    
 
-                    ARP_Reply.add_protocol(ethernet.ethernet(
+                    arp_reply.add_protocol(ethernet.ethernet(
                         ethertype=eth.ethertype,
                         dst=eth_src,
                         src=self.arp_table[arp_dst_ip]))
-                    ARP_Reply.add_protocol(arp.arp(
+                    arp_reply.add_protocol(arp.arp(
                         opcode=arp.ARP_REPLY,
                         src_mac=self.arp_table[arp_dst_ip],
                         src_ip=arp_dst_ip,
                         dst_mac=eth_src,
                         dst_ip=arp_src_ip))
 
-                    ARP_Reply.serialize()
-
+                    arp_reply.serialize()
+                    #arp reply
                     out = parser.OFPPacketOut(
                         datapath=datapath,
                         buffer_id=ofproto.OFP_NO_BUFFER,
                         in_port=ofproto.OFPP_CONTROLLER,
-                        actions=actions, data=ARP_Reply.data)
+                        actions=actions, data=arp_reply.data)
                     datapath.send_msg(out)
                     return True
         return False
