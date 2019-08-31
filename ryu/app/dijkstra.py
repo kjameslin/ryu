@@ -22,20 +22,35 @@ from ryu.lib import mac
 class Topo(object):
     def __init__(self):
         # adjacent map (s1,s2)->(port,weight)
+        # say,we have the following topo
+        # p1---s1---p2-----p3---s2---p4
+        # then the adjacent map={
+        #          (s1,s2):(p2,weight)
+        #          (s2,s1):(p3,weight)
+        # }
+
         self.adjacent=defaultdict(lambda s1s2:None)
         #datapathes
         self.switches=None
-        # switch distances
 
         # use a map to host_mac->(switch,inport)
+        # host_mac_to records a piece of topology information
+        # just an auxiliary map to the controllers mac_to_port
+        
+        # this map privide a way to figure out for a specific host, which switch does it connect to, and if so,through which port.
+        # if we use controller's mac_to_port
+        # we have to enumerate all the content,which is much more time-consuming and error-prone.
         self.host_mac_to={}
     
+    # this is a TODO 
+    # not implemented
     def reset(self):
         self.adjacent=defaultdict(lambda s1s2:None)
         self.switches=None
         self.host_mac_to=None
     
     
+    #helper method to fetch and modify the adjacent map
     def get_adjacent(self,s1,s2):
         return self.adjacent.get((s1,s2))
     
@@ -125,11 +140,13 @@ class Topo(object):
             
         record.append((dst_sw,inport,last_port))
         
-            #inport s1 outport----inport s2 outport---...--inport sn lastport
+        #we find a path
+        # (s1,inport,outport)->(s2,inport,outport)->...->(dest_switch,inport,outport)
         return record
 
 
 #TODO Port status monitor
+
 class DijkstraController(app_manager.RyuApp):
     OFP_VERSIONS=[ofproto_v1_3.OFP_VERSION]
 
@@ -141,7 +158,7 @@ class DijkstraController(app_manager.RyuApp):
         #ip ->mac
         self.arp_table={}
 
-        #revser arp
+        # revser arp table
         # mac->ip
         # this is a TODO
         # not implemented
@@ -151,7 +168,7 @@ class DijkstraController(app_manager.RyuApp):
         self.flood_history={}
 
         self.arp_history={}
-        self.is_learning=[]
+        # self.is_learning={}
     
     def _find_dp(self,dpid):
         for dp in self.datapaths:
@@ -159,11 +176,11 @@ class DijkstraController(app_manager.RyuApp):
                 return dp
         return None
     
-    def _add_islearning(self,src_mac,dst_mac):
-        self.is_learning.append((src_mac,dst_mac))
+    # def _add_islearning(self,src_mac,dst_mac):
+    #     self.is_learning.append((src_mac,dst_mac))
     
-    def _remove_islearning(self,src_mac,dst_mac):
-        self.is_learning.remove((src_mac,dst_mac))
+    # def _remove_islearning(self,src_mac,dst_mac):
+    #     self.is_learning.remove((src_mac,dst_mac))
     
 
     #copy from example
@@ -210,7 +227,8 @@ class DijkstraController(app_manager.RyuApp):
 
         parser=datapath.ofproto_parser
 
-        #inport s1 outport----inport s2 outport---...--inport sn lastport
+        # enumerate the calculated path
+        # (s1,inport,outport)->(s2,inport,outport)->...->(dest_switch,inport,outport)
         for switch,inport,outport in shortest_path:
             match=parser.OFPMatch(in_port=inport,eth_src=src_mac,eth_dst=dst_mac)
 
@@ -218,7 +236,7 @@ class DijkstraController(app_manager.RyuApp):
 
 
             datapath=self._find_dp(int(switch))
-            # datapath=self.datapaths[int(switch)-1]
+            assert datapath is not None
 
             inst=[parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,actions)]
 
@@ -247,7 +265,7 @@ class DijkstraController(app_manager.RyuApp):
 
         self.logger.info("From datapath {} port {} come in a packet".format(datapath.id,in_port))
 
-        #get src_mac and dist mac
+        #get src_mac and dest mac
         pkt=packet.Packet(msg.data)
         eth=pkt.get_protocols(ethernet.ethernet)[0]
 
@@ -267,7 +285,7 @@ class DijkstraController(app_manager.RyuApp):
         #     ip:mac
         # }
         if arp_pkt:
-            self.arp_table[arp_pkt.src_ip] = src_mac  # ARP learning
+            self.arp_table[arp_pkt.src_ip] = src_mac
 
         dpid=datapath.id
 
@@ -282,13 +300,16 @@ class DijkstraController(app_manager.RyuApp):
         # }
         self.mac_to_port.setdefault(dpid,{})
 
-        # flood_history help the controller remember whether a particular switch flooded a packet(identified by src and destination mac) before
+        self.mac_to_port[dpid][src_mac]=in_port
+
+        # flood_history helps the controller remember whether a particular switch flooded a packet(identified by src and destination mac) before
         # flood_history={
         #    switch:[(src_mac,dst_mac)]
         # }
 
         self.flood_history.setdefault(dpid,[])
         # if this is a ipv6 broadcast packet
+
         if '33:33' in dst_mac[:5]:
             # the controller has not flooded this packet before
             if (src_mac,dst_mac) not in self.flood_history[dpid]:
@@ -300,22 +321,23 @@ class DijkstraController(app_manager.RyuApp):
                 
         self.logger.info("packet in %s %s %s %s", dpid, src_mac, dst_mac, in_port)
 
-        self.mac_to_port[dpid][src_mac]=in_port
 
-       
 
         if src_mac not in self.topo.host_mac_to.keys():
             self.topo.host_mac_to[src_mac]=(dpid,in_port)
         
-        # we must assure all the mac has registered
+        # if we have record the dest mac
+        # the dst mac has registered
+
         # host_mac-> switch,inport
         if dst_mac in self.topo.host_mac_to.keys():
             
-            # the dst mac has registered
             final_port=self.topo.host_mac_to[dst_mac][1]
-            # calculate the first
+            # the first switch
             src_switch=self.topo.host_mac_to[src_mac][0]
+            # the final switch
             dst_switch=self.topo.host_mac_to[dst_mac][0]
+            #calculate the shortest path
             shortest_path=self.topo.shortest_path(
                 src_switch,
                 dst_switch,
@@ -329,7 +351,7 @@ class DijkstraController(app_manager.RyuApp):
             # log the shortest path
             path_str=''
 
-            #inport s1 outport----inport s2 outport---...--inport sn lastport
+            # (s1,inport,outport)->(s2,inport,outport)->...->(dest_switch,inport,outport)
             for s,ip,op in shortest_path:
                 path_str=path_str+"--{}-{}-{}--".format(ip,s,op)
             self.logger.info("The shortest path from {} to {} is {}".format(src_mac,dst_mac,path_str))
@@ -346,6 +368,7 @@ class DijkstraController(app_manager.RyuApp):
                     out_port=op
         else: 
             # handle arp packet
+            # in case we meet an arp packet
             if self.arp_handler(msg):  # 1:reply or drop;  0: flood
                 return 
             #the dst mac has not registered
@@ -398,6 +421,8 @@ class DijkstraController(app_manager.RyuApp):
 
         self.logger.info("switches {}".format(self.topo.switches))
 
+        
+
         self.datapaths=[s.dp for s in all_switches]
 
         # get link and get port
@@ -445,10 +470,14 @@ class DijkstraController(app_manager.RyuApp):
             # target ip 
             arp_dst_ip = arp_pkt.dst_ip
 
+            # arp_history={
+            # (datapath.id,eth_src,dest_ip):inport
+            # }
+
             # we have met this particular arp request before
             if (datapath.id, eth_src, arp_dst_ip) in self.arp_history:
                 #(datapath.id,eth_src,target_ip)->inport
-                # the new arp packet did not consist with the record,maybe a broadcasted one
+                # the new arp packet did not consist with the record, it comes from another port, so may be it's broadcasted
                 # we just ignore it
                 if self.arp_history[(datapath.id, eth_src, arp_dst_ip)] != in_port:
                     #datapath.send_packet_out(in_port=in_port, actions=[])
